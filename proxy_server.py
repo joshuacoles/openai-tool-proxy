@@ -3,10 +3,12 @@ from fastapi.responses import StreamingResponse
 import httpx
 import json
 import logging
+import asyncio
+from typing import Optional, Dict, Any
 
 # Configure logging with more detail
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -49,6 +51,64 @@ app = FastAPI(
 )
 
 
+class StreamParser:
+    def __init__(self):
+        self.buffer = ""
+        self.message_count = 0
+    
+    def parse_chunk(self, chunk: bytes) -> Optional[Dict[str, Any]]:
+        """Parse a chunk of bytes into a JSON object."""
+        try:
+            text = chunk.decode('utf-8')
+            logger.debug(f"Raw chunk text: {text}")
+            
+            # Handle server-sent events format
+            if text.startswith('data: '):
+                text = text.removeprefix('data: ')
+            
+            # Skip empty chunks
+            if not text.strip():
+                logger.debug("Skipping empty chunk")
+                return None
+            
+            # Try to parse as JSON
+            try:
+                data = json.loads(text)
+                self.message_count += 1
+                logger.debug(f"Successfully parsed message {self.message_count}: {json.dumps(data, indent=2)}")
+                
+                # Check for tool calls
+                if 'tool_calls' in data:
+                    logger.info(f"Found tool calls in message: {json.dumps(data['tool_calls'], indent=2)}")
+                
+                return data
+            
+            except json.JSONDecodeError:
+                # Add to buffer and try to parse
+                self.buffer += text
+                logger.debug(f"Added to buffer. Current buffer: {self.buffer}")
+                
+                try:
+                    data = json.loads(self.buffer)
+                    self.buffer = ""  # Clear buffer on successful parse
+                    self.message_count += 1
+                    logger.debug(f"Successfully parsed buffered message {self.message_count}: {json.dumps(data, indent=2)}")
+                    
+                    # Check for tool calls
+                    if 'tool_calls' in data:
+                        logger.info(f"Found tool calls in buffered message: {json.dumps(data['tool_calls'], indent=2)}")
+                    
+                    return data
+                
+                except json.JSONDecodeError:
+                    logger.debug("Incomplete JSON in buffer, waiting for more chunks")
+                    return None
+        
+        except Exception as e:
+            logger.error(f"Error parsing chunk: {str(e)}")
+            return None
+
+
 @app.post("/v1/chat/completions")
 async def proxy_request(request: Request) -> Response:
     logger.info("Received chat completion request")
@@ -85,6 +145,8 @@ async def proxy_request(request: Request) -> Response:
     
     # Handle streaming response
     logger.info("Handling streaming request")
+    parser = StreamParser()
+    
     async def stream_response():
         async with httpx.AsyncClient(timeout=timeout) as client:
             logger.info("Starting streaming request to Ollama")
@@ -95,8 +157,13 @@ async def proxy_request(request: Request) -> Response:
             ) as response:
                 logger.info("Established streaming connection with Ollama")
                 async for chunk in response.aiter_bytes():
-                    logger.info(f"Streaming chunk: {chunk.decode()}")
-                    yield chunk
+                    parsed = parser.parse_chunk(chunk)
+                    if parsed:
+                        # Re-encode as SSE format
+                        yield f"data: {json.dumps(parsed)}\n\n".encode('utf-8')
+                    else:
+                        # Forward unparseable chunks as-is
+                        yield chunk
     
     logger.info("Returning streaming response")
     return StreamingResponse(
