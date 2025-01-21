@@ -2,6 +2,11 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 import httpx
 import json
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     debug=True,  # Enable debug mode for more detailed logging
@@ -14,6 +19,7 @@ app = FastAPI(
 async def proxy_request(request: Request) -> Response:
     # Get the raw request body
     body = await request.json()
+    logger.info(f"Incoming request: {json.dumps(body, indent=2)}")
     
     # Check if streaming is requested
     stream = body.get('stream', False)
@@ -24,6 +30,8 @@ async def proxy_request(request: Request) -> Response:
                 "http://localhost:11434/v1/chat/completions",
                 json=body
             )
+            response_body = ollama_response.json()
+            logger.info(f"Ollama response: {json.dumps(response_body, indent=2)}")
             return Response(
                 content=ollama_response.content,
                 status_code=ollama_response.status_code,
@@ -39,6 +47,7 @@ async def proxy_request(request: Request) -> Response:
                 json=body
             ) as response:
                 async for chunk in response.aiter_bytes():
+                    logger.info(f"Streaming chunk: {chunk.decode()}")
                     yield chunk
     
     return StreamingResponse(
