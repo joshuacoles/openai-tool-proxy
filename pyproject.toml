@@ -7,4 +7,5 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]>=0.115.6",
     "httpx>=0.28.1",
+    "openai>=1.59.9",
 ]
