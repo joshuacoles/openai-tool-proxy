@@ -119,6 +119,7 @@ class StreamParser:
         self.message_count = 0
         self.tool_executor = ToolExecutor()
         self.client = client
+        self.conversation_history: List[Dict[str, Any]] = []  # Track conversation
         logger.info("StreamParser initialized")
 
     def extract_tool_calls(
@@ -169,16 +170,29 @@ class StreamParser:
         """Send tool results back to Ollama as a new message and stream the response."""
         logger.info("Sending tool results back to Ollama")
 
-        # Create the request to send back to Ollama
+        # Add the assistant's tool call to the history
+        if (choices := original_message.get("choices")) and choices:
+            first_choice = choices[0]
+            if (delta := first_choice.get("delta")) and "tool_calls" in delta:
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": delta["tool_calls"]
+                })
+
+        # Add tool results to history
+        self.conversation_history.extend([result for result in tool_results])
+
+        # Create the request with full conversation history
         request_body = {
             "model": original_message["model"],
-            "messages": tool_results,  # Send tool results as messages
+            "messages": self.conversation_history,
             "stream": True,
-            "tools": PROXY_TOOLS,  # Include tools definition for potential follow-up calls
+            "tools": PROXY_TOOLS,
         }
 
         logger.debug(
-            f"Sending tool results to Ollama: {json.dumps(request_body, indent=2)}"
+            f"Sending request with conversation history to Ollama: {json.dumps(request_body, indent=2)}"
         )
 
         try:
@@ -373,7 +387,10 @@ async def proxy_request(request: Request) -> Response:
         async with httpx.AsyncClient(timeout=timeout) as client:
             logger.info("Starting streaming request to Ollama")
             parser = StreamParser(client)
-
+            
+            # Initialize conversation history with the user's messages
+            parser.conversation_history = body.get("messages", [])
+            
             async with client.stream(
                 "POST", "http://localhost:11434/v1/chat/completions", json=body
             ) as response:
