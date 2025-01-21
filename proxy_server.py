@@ -4,7 +4,8 @@ import httpx
 import json
 import logging
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+from dataclasses import dataclass
 
 # Configure logging with more detail
 logging.basicConfig(
@@ -50,12 +51,133 @@ app = FastAPI(
     description="A proxy server that adds tool definitions to LLM requests"
 )
 
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: Dict[str, Any]
+
+class CalculatorTool:
+    @staticmethod
+    async def execute(args: Dict[str, Any]) -> Any:
+        operation = args['operation']
+        a = args['a']
+        b = args['b']
+        
+        logger.info(f"Executing calculator tool: {operation}({a}, {b})")
+        
+        result = {
+            'add': lambda: a + b,
+            'subtract': lambda: a - b,
+            'multiply': lambda: a * b,
+            'divide': lambda: a / b if b != 0 else "Error: Division by zero"
+        }[operation]()
+        
+        logger.info(f"Calculator result: {result}")
+        return result
+
+class ToolExecutor:
+    def __init__(self):
+        self.tools = {
+            'calculate': CalculatorTool.execute
+        }
+        logger.info(f"ToolExecutor initialized with tools: {list(self.tools.keys())}")
+    
+    async def execute_tool(self, tool_call: ToolCall) -> Dict[str, Any]:
+        """Execute a tool call and return the result in the expected format."""
+        logger.info(f"Executing tool call: id={tool_call.id}, name={tool_call.name}, args={tool_call.arguments}")
+        
+        if tool_call.name not in self.tools:
+            logger.error(f"Unknown tool: {tool_call.name}, available tools: {list(self.tools.keys())}")
+            return {
+                "tool_call_id": tool_call.id,
+                "output": f"Error: Unknown tool {tool_call.name}"
+            }
+        
+        try:
+            logger.debug(f"Invoking tool {tool_call.name} with arguments: {tool_call.arguments}")
+            result = await self.tools[tool_call.name](tool_call.arguments)
+            logger.info(f"Tool execution successful: id={tool_call.id}, result={result}")
+            return {
+                "tool_call_id": tool_call.id,
+                "output": str(result)
+            }
+        except Exception as e:
+            logger.error(f"Tool execution error for {tool_call.name}: {str(e)}", exc_info=True)
+            return {
+                "tool_call_id": tool_call.id,
+                "output": f"Error: {str(e)}"
+            }
 
 class StreamParser:
     def __init__(self):
         self.buffer = ""
         self.message_count = 0
+        self.tool_executor = ToolExecutor()
+        logger.info("StreamParser initialized")
     
+    def extract_tool_calls(self, data: Dict[str, Any]) -> List[ToolCall]:
+        """Extract tool calls from a delta message."""
+        logger.debug(f"Extracting tool calls from message: {json.dumps(data, indent=2)}")
+        tool_calls = []
+        
+        if (choices := data.get('choices')) and choices:
+            first_choice = choices[0]
+            if (delta := first_choice.get('delta')) and 'tool_calls' in delta:
+                logger.info(f"Found tool_calls in delta: {json.dumps(delta['tool_calls'], indent=2)}")
+                for tool_call in delta['tool_calls']:
+                    try:
+                        logger.debug(f"Processing tool call: {json.dumps(tool_call, indent=2)}")
+                        arguments = json.loads(tool_call['function']['arguments'])
+                        tool_call_obj = ToolCall(
+                            id=tool_call['id'],
+                            name=tool_call['function']['name'],
+                            arguments=arguments
+                        )
+                        logger.info(f"Created ToolCall object: {tool_call_obj}")
+                        tool_calls.append(tool_call_obj)
+                    except Exception as e:
+                        logger.error(f"Error parsing tool call: {str(e)}", exc_info=True)
+                        logger.error(f"Problematic tool call data: {json.dumps(tool_call, indent=2)}")
+        
+        return tool_calls
+
+    async def process_chunk(self, chunk: bytes) -> Optional[Dict[str, Any]]:
+        """Parse and process a chunk, executing any tool calls found."""
+        logger.debug(f"Processing chunk of size: {len(chunk)} bytes")
+        parsed = self.parse_chunk(chunk)
+        if not parsed:
+            logger.debug("No valid JSON found in chunk")
+            return None
+        
+        tool_calls = self.extract_tool_calls(parsed)
+        if tool_calls:
+            logger.info(f"Processing {len(tool_calls)} tool calls")
+            results = []
+            for tool_call in tool_calls:
+                result = await self.tool_executor.execute_tool(tool_call)
+                logger.info(f"Tool execution result: {json.dumps(result, indent=2)}")
+                results.append(result)
+            
+            # Create a tool result message in OpenAI format
+            response = {
+                "id": parsed['id'],
+                "object": "chat.completion.chunk",
+                "created": parsed['created'],
+                "model": parsed['model'],
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": results
+                    },
+                    "finish_reason": None
+                }]
+            }
+            logger.debug(f"Created tool response message: {json.dumps(response, indent=2)}")
+            return response
+        
+        return parsed
+
     def parse_chunk(self, chunk: bytes) -> Optional[Dict[str, Any]]:
         """Parse a chunk of bytes into a JSON object."""
         try:
@@ -161,10 +283,10 @@ async def proxy_request(request: Request) -> Response:
             ) as response:
                 logger.info("Established streaming connection with Ollama")
                 async for chunk in response.aiter_bytes():
-                    parsed = parser.parse_chunk(chunk)
-                    if parsed:
+                    processed = await parser.process_chunk(chunk)
+                    if processed:
                         # Re-encode as SSE format
-                        yield f"data: {json.dumps(parsed)}\n\n".encode('utf-8')
+                        yield f"data: {json.dumps(processed)}\n\n".encode('utf-8')
                     else:
                         # Forward unparseable chunks as-is
                         yield chunk
