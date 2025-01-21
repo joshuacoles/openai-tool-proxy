@@ -4,7 +4,7 @@ import httpx
 import json
 import logging
 import asyncio
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, AsyncGenerator
 from dataclasses import dataclass
 
 # Configure logging with more detail
@@ -143,8 +143,8 @@ class StreamParser:
         
         return tool_calls
 
-    async def send_tool_results_to_ollama(self, original_message: Dict[str, Any], tool_results: List[Dict[str, Any]]) -> None:
-        """Send tool results back to Ollama as a new message."""
+    async def send_tool_results_to_ollama(self, original_message: Dict[str, Any], tool_results: List[Dict[str, Any]]) -> AsyncGenerator[bytes, None]:
+        """Send tool results back to Ollama as a new message and stream the response."""
         logger.info("Sending tool results back to Ollama")
         
         # Create a message containing the tool results
@@ -165,22 +165,28 @@ class StreamParser:
         logger.debug(f"Sending tool results to Ollama: {json.dumps(request_body, indent=2)}")
         
         try:
-            response = await self.client.post(
+            async with self.client.stream(
+                "POST",
                 "http://localhost:11434/v1/chat/completions",
                 json=request_body
-            )
-            logger.info("Successfully sent tool results to Ollama")
+            ) as response:
+                logger.info("Receiving streamed response from tool result submission")
+                async for chunk in response.aiter_bytes():
+                    logger.debug(f"Received follow-up chunk: {chunk.decode()}")
+                    yield chunk
+                    
         except Exception as e:
             logger.error(f"Error sending tool results to Ollama: {str(e)}", exc_info=True)
             raise
 
-    async def process_chunk(self, chunk: bytes) -> Optional[Dict[str, Any]]:
+    async def process_chunk(self, chunk: bytes) -> AsyncGenerator[bytes, None]:
         """Parse and process a chunk, executing any tool calls found."""
         logger.debug(f"Processing chunk of size: {len(chunk)} bytes")
         parsed = self.parse_chunk(chunk)
         if not parsed:
             logger.debug("No valid JSON found in chunk")
-            return None
+            yield chunk
+            return
         
         tool_calls = self.extract_tool_calls(parsed)
         if tool_calls:
@@ -191,13 +197,31 @@ class StreamParser:
                 logger.info(f"Tool execution result: {json.dumps(result, indent=2)}")
                 results.append(result)
             
-            # Send results back to Ollama
+            # Send results back to Ollama and stream the response
             try:
-                await self.send_tool_results_to_ollama(parsed, results)
+                # First yield the tool execution results to the client
+                response = {
+                    "id": parsed['id'],
+                    "object": "chat.completion.chunk",
+                    "created": parsed['created'],
+                    "model": parsed['model'],
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": results
+                        },
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(response)}\n\n".encode('utf-8')
+                
+                # Then stream Ollama's response to the tool results
+                async for follow_up_chunk in self.send_tool_results_to_ollama(parsed, results):
+                    yield follow_up_chunk
+                    
             except Exception as e:
                 logger.error("Failed to send tool results to Ollama", exc_info=True)
-                # Create an error response
-                return {
+                error_response = {
                     "id": parsed['id'],
                     "object": "chat.completion.chunk",
                     "created": parsed['created'],
@@ -210,25 +234,10 @@ class StreamParser:
                         "finish_reason": "error"
                     }]
                 }
-            
-            # Return the tool execution results to the client as well
-            response = {
-                "id": parsed['id'],
-                "object": "chat.completion.chunk",
-                "created": parsed['created'],
-                "model": parsed['model'],
-                "choices": [{
-                    "index": 0,
-                    "delta": {
-                        "tool_calls": results
-                    },
-                    "finish_reason": None
-                }]
-            }
-            logger.debug(f"Created tool response message: {json.dumps(response, indent=2)}")
-            return response
-        
-        return parsed
+                yield f"data: {json.dumps(error_response)}\n\n".encode('utf-8')
+        else:
+            # No tool calls, just forward the chunk
+            yield f"data: {json.dumps(parsed)}\n\n".encode('utf-8')
 
     def parse_chunk(self, chunk: bytes) -> Optional[Dict[str, Any]]:
         """Parse a chunk of bytes into a JSON object."""
@@ -327,7 +336,7 @@ async def proxy_request(request: Request) -> Response:
     async def stream_response():
         async with httpx.AsyncClient(timeout=timeout) as client:
             logger.info("Starting streaming request to Ollama")
-            parser = StreamParser(client)  # Pass client to parser
+            parser = StreamParser(client)
             
             async with client.stream(
                 "POST",
@@ -336,13 +345,8 @@ async def proxy_request(request: Request) -> Response:
             ) as response:
                 logger.info("Established streaming connection with Ollama")
                 async for chunk in response.aiter_bytes():
-                    processed = await parser.process_chunk(chunk)
-                    if processed:
-                        # Re-encode as SSE format
-                        yield f"data: {json.dumps(processed)}\n\n".encode('utf-8')
-                    else:
-                        # Forward unparseable chunks as-is
-                        yield chunk
+                    async for processed_chunk in parser.process_chunk(chunk):
+                        yield processed_chunk
     
     logger.info("Returning streaming response")
     return StreamingResponse(
