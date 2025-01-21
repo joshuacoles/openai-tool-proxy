@@ -110,10 +110,11 @@ class ToolExecutor:
             }
 
 class StreamParser:
-    def __init__(self):
+    def __init__(self, client: httpx.AsyncClient):
         self.buffer = ""
         self.message_count = 0
         self.tool_executor = ToolExecutor()
+        self.client = client  # Store client for making requests back to Ollama
         logger.info("StreamParser initialized")
     
     def extract_tool_calls(self, data: Dict[str, Any]) -> List[ToolCall]:
@@ -142,6 +143,37 @@ class StreamParser:
         
         return tool_calls
 
+    async def send_tool_results_to_ollama(self, original_message: Dict[str, Any], tool_results: List[Dict[str, Any]]) -> None:
+        """Send tool results back to Ollama as a new message."""
+        logger.info("Sending tool results back to Ollama")
+        
+        # Create a message containing the tool results
+        tool_message = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": tool_results
+        }
+        
+        # Create the request to send back to Ollama
+        request_body = {
+            "model": original_message["model"],
+            "messages": [tool_message],
+            "stream": True,  # Keep streaming enabled
+            "tools": PROXY_TOOLS  # Include tools definition
+        }
+        
+        logger.debug(f"Sending tool results to Ollama: {json.dumps(request_body, indent=2)}")
+        
+        try:
+            response = await self.client.post(
+                "http://localhost:11434/v1/chat/completions",
+                json=request_body
+            )
+            logger.info("Successfully sent tool results to Ollama")
+        except Exception as e:
+            logger.error(f"Error sending tool results to Ollama: {str(e)}", exc_info=True)
+            raise
+
     async def process_chunk(self, chunk: bytes) -> Optional[Dict[str, Any]]:
         """Parse and process a chunk, executing any tool calls found."""
         logger.debug(f"Processing chunk of size: {len(chunk)} bytes")
@@ -159,7 +191,27 @@ class StreamParser:
                 logger.info(f"Tool execution result: {json.dumps(result, indent=2)}")
                 results.append(result)
             
-            # Create a tool result message in OpenAI format
+            # Send results back to Ollama
+            try:
+                await self.send_tool_results_to_ollama(parsed, results)
+            except Exception as e:
+                logger.error("Failed to send tool results to Ollama", exc_info=True)
+                # Create an error response
+                return {
+                    "id": parsed['id'],
+                    "object": "chat.completion.chunk",
+                    "created": parsed['created'],
+                    "model": parsed['model'],
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "content": f"Error processing tool results: {str(e)}"
+                        },
+                        "finish_reason": "error"
+                    }]
+                }
+            
+            # Return the tool execution results to the client as well
             response = {
                 "id": parsed['id'],
                 "object": "chat.completion.chunk",
@@ -271,11 +323,12 @@ async def proxy_request(request: Request) -> Response:
     
     # Handle streaming response
     logger.info("Handling streaming request")
-    parser = StreamParser()
     
     async def stream_response():
         async with httpx.AsyncClient(timeout=timeout) as client:
             logger.info("Starting streaming request to Ollama")
+            parser = StreamParser(client)  # Pass client to parser
+            
             async with client.stream(
                 "POST",
                 "http://localhost:11434/v1/chat/completions",
