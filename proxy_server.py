@@ -56,6 +56,7 @@ app = FastAPI(
     description="A proxy server that adds tool definitions to LLM requests"
 )
 
+
 class CalculatorTool:
     @staticmethod
     async def execute(args: Dict[str, Any]) -> Any:
@@ -75,6 +76,7 @@ class CalculatorTool:
         logger.info(f"Calculator result: {result}")
         return result
 
+
 class ToolExecutor:
     def __init__(self):
         self.tools = {
@@ -84,7 +86,8 @@ class ToolExecutor:
 
     async def execute_tool(self, tool_call: ChatCompletionMessageToolCall) -> ChatCompletionToolMessageParam:
         """Execute a tool call and return the result in the expected format."""
-        logger.info(f"Executing tool call: id={tool_call.id}, name={tool_call.function.name}, args={tool_call.function.arguments}")
+        logger.info(
+            f"Executing tool call: id={tool_call.id}, name={tool_call.function.name}, args={tool_call.function.arguments}")
 
         if tool_call.function.name not in self.tools:
             logger.error(f"Unknown tool: {tool_call.function.name}, available tools: {list(self.tools.keys())}")
@@ -112,6 +115,7 @@ class ToolExecutor:
                 tool_call_id=tool_call.id,
                 content=f"Error: {str(e)}"
             )
+
 
 class StreamParser:
     def __init__(self, client: httpx.AsyncClient):
@@ -149,32 +153,32 @@ class StreamParser:
 
         return tool_calls
 
-    async def send_tool_results_to_ollama(self, original_message: Dict[str, Any], tool_results: List[Dict[str, Any]]) -> AsyncGenerator[bytes, None]:
+    async def send_tool_results_to_ollama(
+            self,
+            original_message: Dict[str, Any],
+            tool_results: List[ChatCompletionToolMessageParam]
+    ) -> AsyncGenerator[bytes, None]:
         """Send tool results back to Ollama as a new message and stream the response."""
         logger.info("Sending tool results back to Ollama")
 
-        # Create a message containing the tool results
-        tool_message = {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": tool_results
-        }
+        # Create the tool response message
+        tool_messages = [result.model_dump() for result in tool_results]
 
         # Create the request to send back to Ollama
         request_body = {
             "model": original_message["model"],
-            "messages": [tool_message],
-            "stream": True,  # Keep streaming enabled
-            "tools": PROXY_TOOLS  # Include tools definition
+            "messages": tool_messages,  # Send tool results as messages
+            "stream": True,
+            "tools": PROXY_TOOLS  # Include tools definition for potential follow-up calls
         }
 
         logger.debug(f"Sending tool results to Ollama: {json.dumps(request_body, indent=2)}")
 
         try:
             async with self.client.stream(
-                "POST",
-                "http://localhost:11434/v1/chat/completions",
-                json=request_body
+                    "POST",
+                    "http://localhost:11434/v1/chat/completions",
+                    json=request_body
             ) as response:
                 logger.info("Receiving streamed response from tool result submission")
                 async for chunk in response.aiter_bytes():
@@ -197,10 +201,11 @@ class StreamParser:
         tool_calls = self.extract_tool_calls(parsed)
         if tool_calls:
             logger.info(f"Processing {len(tool_calls)} tool calls")
-            results = []
+            results: List[ChatCompletionToolMessageParam] = []
             for tool_call in tool_calls:
                 result = await self.tool_executor.execute_tool(tool_call)
-                logger.info(f"Tool execution result: {json.dumps(result, indent=2)}")
+                logger.info(
+                    f"Tool execution result: {result.model_dump_json()}")  # Use model_dump_json for proper serialization
                 results.append(result)
 
             # Send results back to Ollama and stream the response
@@ -214,7 +219,7 @@ class StreamParser:
                     "choices": [{
                         "index": 0,
                         "delta": {
-                            "tool_calls": results
+                            "tool_calls": [result.model_dump() for result in results]
                         },
                         "finish_reason": None
                     }]
@@ -283,13 +288,15 @@ class StreamParser:
                     data = json.loads(self.buffer)
                     self.buffer = ""  # Clear buffer on successful parse
                     self.message_count += 1
-                    logger.debug(f"Successfully parsed buffered message {self.message_count}: {json.dumps(data, indent=2)}")
+                    logger.debug(
+                        f"Successfully parsed buffered message {self.message_count}: {json.dumps(data, indent=2)}")
 
                     # Check for tool calls in the OpenAI streaming format
                     if (choices := data.get('choices')) and choices:
                         first_choice = choices[0]
                         if (delta := first_choice.get('delta')) and 'tool_calls' in delta:
-                            logger.info(f"Found tool calls in buffered delta: {json.dumps(delta['tool_calls'], indent=2)}")
+                            logger.info(
+                                f"Found tool calls in buffered delta: {json.dumps(delta['tool_calls'], indent=2)}")
 
                     return data
 
@@ -345,9 +352,9 @@ async def proxy_request(request: Request) -> Response:
             parser = StreamParser(client)
 
             async with client.stream(
-                "POST",
-                "http://localhost:11434/v1/chat/completions",
-                json=body
+                    "POST",
+                    "http://localhost:11434/v1/chat/completions",
+                    json=body
             ) as response:
                 logger.info("Established streaming connection with Ollama")
                 async for chunk in response.aiter_bytes():
@@ -359,4 +366,3 @@ async def proxy_request(request: Request) -> Response:
         stream_response(),
         media_type="text/event-stream"
     )
-
