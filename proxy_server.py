@@ -95,7 +95,7 @@ async def proxy_request(request: Request) -> Response:
             ) as response:
                 logger.info("Established streaming connection with Ollama")
                 async for chunk in response.aiter_bytes():
-                    logger.debug(f"Received chunk: {chunk.decode()}")
+                    logger.info(f"Streaming chunk: {chunk.decode()}")
                     yield chunk
     
     logger.info("Returning streaming response")
