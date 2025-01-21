@@ -3,9 +3,10 @@ from fastapi.responses import StreamingResponse
 import httpx
 import json
 import logging
-import asyncio
 from typing import Optional, Dict, Any, List, AsyncGenerator
 from dataclasses import dataclass
+
+from openai.types import FunctionDefinition
 
 # Configure logging with more detail
 logging.basicConfig(
@@ -14,36 +15,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Define test tool
-CALCULATOR_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "calculate",
-        "description": "Perform basic arithmetic calculations",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "enum": ["add", "subtract", "multiply", "divide"],
-                    "description": "The arithmetic operation to perform"
-                },
-                "a": {
-                    "type": "number",
-                    "description": "First number"
-                },
-                "b": {
-                    "type": "number",
-                    "description": "Second number"
-                }
+# Define test tool using FunctionDefinition
+CALCULATOR_TOOL = FunctionDefinition(
+    name="calculate",
+    description="Perform basic arithmetic calculations",
+    parameters={
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["add", "subtract", "multiply", "divide"],
+                "description": "The arithmetic operation to perform"
             },
-            "required": ["operation", "a", "b"]
-        }
+            "a": {
+                "type": "number",
+                "description": "First number"
+            },
+            "b": {
+                "type": "number",
+                "description": "Second number"
+            }
+        },
+        "required": ["operation", "a", "b"]
     }
-}
+)
 
 # Define our tools to inject
-PROXY_TOOLS = [CALCULATOR_TOOL]
+PROXY_TOOLS = [{
+    "type": "function",
+    "function": CALCULATOR_TOOL.model_dump()
+}]
 
 app = FastAPI(
     debug=True,  # Enable debug mode for more detailed logging
