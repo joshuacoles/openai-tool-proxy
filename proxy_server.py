@@ -77,9 +77,11 @@ class StreamParser:
                 self.message_count += 1
                 logger.debug(f"Successfully parsed message {self.message_count}: {json.dumps(data, indent=2)}")
                 
-                # Check for tool calls
-                if 'tool_calls' in data:
-                    logger.info(f"Found tool calls in message: {json.dumps(data['tool_calls'], indent=2)}")
+                # Check for tool calls in the OpenAI streaming format
+                if (choices := data.get('choices')) and choices:
+                    first_choice = choices[0]
+                    if (delta := first_choice.get('delta')) and 'tool_calls' in delta:
+                        logger.info(f"Found tool calls in delta: {json.dumps(delta['tool_calls'], indent=2)}")
                 
                 return data
             
@@ -94,9 +96,11 @@ class StreamParser:
                     self.message_count += 1
                     logger.debug(f"Successfully parsed buffered message {self.message_count}: {json.dumps(data, indent=2)}")
                     
-                    # Check for tool calls
-                    if 'tool_calls' in data:
-                        logger.info(f"Found tool calls in buffered message: {json.dumps(data['tool_calls'], indent=2)}")
+                    # Check for tool calls in the OpenAI streaming format
+                    if (choices := data.get('choices')) and choices:
+                        first_choice = choices[0]
+                        if (delta := first_choice.get('delta')) and 'tool_calls' in delta:
+                            logger.info(f"Found tool calls in buffered delta: {json.dumps(delta['tool_calls'], indent=2)}")
                     
                     return data
                 
