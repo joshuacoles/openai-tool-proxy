@@ -169,13 +169,10 @@ class StreamParser:
         """Send tool results back to Ollama as a new message and stream the response."""
         logger.info("Sending tool results back to Ollama")
 
-        # Create the tool response message
-        tool_messages = [result.model_dump() for result in tool_results]
-
         # Create the request to send back to Ollama
         request_body = {
             "model": original_message["model"],
-            "messages": tool_messages,  # Send tool results as messages
+            "messages": tool_results,  # Send tool results as messages
             "stream": True,
             "tools": PROXY_TOOLS,  # Include tools definition for potential follow-up calls
         }
@@ -215,8 +212,8 @@ class StreamParser:
             for tool_call in tool_calls:
                 result = await self.tool_executor.execute_tool(tool_call)
                 logger.info(
-                    f"Tool execution result: {result.model_dump_json()}"
-                )  # Use model_dump_json for proper serialization
+                    f"Tool execution result: {result}"
+                )
                 results.append(result)
 
             # Send results back to Ollama and stream the response
@@ -231,9 +228,7 @@ class StreamParser:
                         {
                             "index": 0,
                             "delta": {
-                                "tool_calls": [
-                                    result.model_dump() for result in results
-                                ]
+                                "tool_calls": [result for result in results]
                             },
                             "finish_reason": None,
                         }
